@@ -6,13 +6,17 @@ import requests
 
 MCP_URL = os.getenv("VARIFLIGHT_MCP_URL", "https://ai.variflight.com/servers/tripmatch/mcp")
 API_KEY = os.getenv("VARIFLIGHT_API_KEY", "")
-THRESHOLD_MINUTES = int(os.getenv("DELAY_THRESHOLD_MINUTES", "120"))
 
 
 def rpc(method, params=None, request_id=1):
     if not API_KEY:
         raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
-    r = requests.post(MCP_URL, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "X-API-Key": API_KEY}, json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}, timeout=30)
+    r = requests.post(
+        MCP_URL,
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "X-API-Key": API_KEY},
+        json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}},
+        timeout=30,
+    )
     print(f"HTTP {r.status_code} | {method}")
     r.raise_for_status()
     text = r.text.strip()
@@ -36,35 +40,70 @@ def text_of(x):
     return str(x)
 
 
-def get_beijing_today():
-    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+def beijing_now():
+    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+
+
+def extract_json_text(result):
+    texts = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values(): walk(v)
+        elif isinstance(x, list):
+            for v in x: walk(v)
+        elif isinstance(x, str): texts.append(x)
+    walk(result)
+    return "\n".join(texts)
 
 
 def main():
     if not API_KEY:
         raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
 
-    print("=== VariFlight MCP 北京时间当天诊断 ===")
+    print("=== VariFlight MCP 认证与参数诊断 ===")
     print(f"MCP：{MCP_URL}")
+    print(f"API Key 已读取：{'YES' if API_KEY else 'NO'} | 长度：{len(API_KEY)}")
+
     listing = rpc("tools/list", {}, 1)
     tools = listing.get("result", {}).get("tools", [])
-    names = {t.get("name") for t in tools if isinstance(t, dict) and t.get("name")}
-    print(f"工具数量：{len(names)}")
-    print("工具发现：" + ", ".join(sorted(names)))
+    print(f"工具数量：{len(tools)}")
+    targets = []
+    for t in tools:
+        if not isinstance(t, dict): continue
+        name = t.get("name", "")
+        if name in {"searchFlightsByDepArr", "searchFlightsByNumber"}:
+            targets.append(t)
+            print(f"\n工具：{name}")
+            print(f"描述：{t.get('description', '')}")
+            print("输入 schema：")
+            print(json.dumps(t.get("inputSchema", {}), ensure_ascii=False, indent=2)[:5000])
 
-    # 航班查询日期以中国标准时间（UTC+8）为准，不使用 MCP 的错误日期。
-    today = get_beijing_today()
-    print(f"北京时间：{datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
+    if not targets:
+        raise RuntimeError("MCP 没有找到航班查询工具")
+
+    today = beijing_now().strftime("%Y-%m-%d")
+    print(f"\n北京时间：{beijing_now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"航班查询日期：{today}")
 
-    if "searchFlightsByDepArr" not in names:
-        raise RuntimeError("MCP 未提供 searchFlightsByDepArr")
+    # 优先按航班号查询，避免机场参数猜测造成误判。测试一个明确的国内航班号。
+    if any(t.get("name") == "searchFlightsByNumber" for t in targets):
+        print("\n=== 测试 searchFlightsByNumber ===")
+        try:
+            result = tool("searchFlightsByNumber", {"flightNo": "MU2157", "date": today, "dep": "", "arr": ""}, 2)
+            print(json.dumps(result, ensure_ascii=False)[:5000])
+        except Exception as exc:
+            print(f"航班号查询异常：{exc}")
 
-    # 低额度诊断：验证当天日期进入真实航班查询请求。
-    result = tool("searchFlightsByDepArr", {"dep": "CAN", "arr": "PEK", "date": today}, 2)
-    print("=== CAN→PEK 当天查询原始返回 ===")
-    print(json.dumps(result, ensure_ascii=False)[:5000])
-    print("=== 诊断结束 ===")
+    if any(t.get("name") == "searchFlightsByDepArr" for t in targets):
+        print("\n=== 测试 searchFlightsByDepArr ===")
+        try:
+            result = tool("searchFlightsByDepArr", {"dep": "CAN", "arr": "PEK", "date": today}, 3)
+            print(json.dumps(result, ensure_ascii=False)[:5000])
+        except Exception as exc:
+            print(f"机场查询异常：{exc}")
+
+    print("\n=== 诊断结束 ===")
+    print("注意：本次只诊断真实 MCP 参数和认证返回，不会伪造航班结果。")
 
 
 if __name__ == "__main__":
