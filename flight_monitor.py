@@ -1,13 +1,13 @@
+import ast
 import json
 import os
-import hashlib
 from datetime import datetime, timezone, timedelta
 import requests
 
 MCP_URL = os.getenv("VARIFLIGHT_MCP_URL", "https://ai.variflight.com/servers/aviation/mcp")
 API_KEY = os.getenv("VARIFLIGHT_API_KEY", "")
 DELAY_THRESHOLD = int(os.getenv("DELAY_THRESHOLD_MINUTES", "230"))
-AIRLINES = {"CZ", "MU"}
+AIRLINE = "CZ"
 
 
 def rpc(method, params=None, request_id=1):
@@ -18,17 +18,17 @@ def rpc(method, params=None, request_id=1):
         "Accept": "application/json, text/event-stream",
         "X-API-Key": API_KEY,
     }
-    r = requests.post(
+    response = requests.post(
         MCP_URL,
         headers=headers,
         json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}},
         timeout=30,
     )
-    r.raise_for_status()
-    text = r.text.strip()
+    response.raise_for_status()
+    text = response.text.strip()
     if text.startswith("data:"):
-        data = [x[5:].strip() for x in text.splitlines() if x.startswith("data:")]
-        text = data[-1] if data else text
+        data_lines = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+        text = data_lines[-1] if data_lines else text
     return json.loads(text)
 
 
@@ -56,33 +56,58 @@ def parse_flight_records(result):
     marker = "Flight details:"
     if marker in text:
         text = text.split(marker, 1)[1].strip()
+    if not text:
+        return []
     try:
-        obj = eval(text, {"__builtins__": {}}, {})
-        if isinstance(obj, dict):
-            data = obj.get("data", [])
-            return data if isinstance(data, list) else []
+        obj = json.loads(text)
     except Exception:
-        pass
+        try:
+            obj = ast.literal_eval(text)
+        except Exception:
+            return []
+    if isinstance(obj, dict):
+        data = obj.get("data", [])
+        return data if isinstance(data, list) else []
     return []
+
+
+def is_domestic(flight):
+    dep = str(flight.get("FlightDepcode", "")).upper()
+    arr = str(flight.get("FlightArrcode", "")).upper()
+    return bool(dep and arr)
+
+
+def is_cz(flight):
+    number = str(flight.get("FlightNo", "")).upper().replace(" ", "")
+    return number.startswith(AIRLINE)
 
 
 def delay_minutes(flight):
     plan = flight.get("FlightDeptimePlanDate")
-    estimate = flight.get("VeryZhunReadyDeptimeDate") or flight.get("FlightDeptimeReadyDate") or flight.get("FlightDeptimeDate")
+    estimate = (
+        flight.get("VeryZhunReadyDeptimeDate")
+        or flight.get("FlightDeptimeReadyDate")
+        or flight.get("FlightDeptimeDate")
+    )
     if not plan or not estimate:
         return None
     try:
-        p = datetime.strptime(plan, "%Y-%m-%d %H:%M:%S")
-        e = datetime.strptime(estimate, "%Y-%m-%d %H:%M:%S")
-        return max(0, int((e - p).total_seconds() // 60))
+        planned = datetime.strptime(plan, "%Y-%m-%d %H:%M:%S")
+        estimated = datetime.strptime(estimate, "%Y-%m-%d %H:%M:%S")
+        return max(0, int((estimated - planned).total_seconds() // 60))
     except Exception:
         return None
 
 
-def domestic(f):
-    dep = f.get("FlightDepcode", "")
-    arr = f.get("FlightArrcode", "")
-    return bool(dep and arr) and dep != arr
+def format_alert(flight, delay):
+    return (
+        f"{flight.get('FlightNo', '未知')}｜"
+        f"{flight.get('FlightDep', flight.get('FlightDepcode', ''))}→"
+        f"{flight.get('FlightArr', flight.get('FlightArrcode', ''))}｜"
+        f"计划起飞：{flight.get('FlightDeptimePlanDate', '')}｜"
+        f"预计延误：{delay} 分钟｜"
+        f"状态：{flight.get('FlightState', '')}"
+    )
 
 
 def main():
@@ -91,48 +116,55 @@ def main():
 
     now = beijing_now()
     date = now.strftime("%Y-%m-%d")
-    print("=== 中国航班延误监控 ===")
+    print("=== CZ 全国国内航班延误监控 ===")
     print(f"北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"监控航空公司：{', '.join(sorted(AIRLINES))}")
+    print("航空公司：CZ（中国南方航空）")
+    print("起飞机场：不限")
+    print("到达机场：不限")
+    print("范围：中国国内")
     print(f"延误阈值：≥ {DELAY_THRESHOLD} 分钟（3小时50分钟）")
+    print("检查周期：每30分钟")
 
     listing = rpc("tools/list", {}, 1)
-    names = {t.get("name") for t in listing.get("result", {}).get("tools", []) if isinstance(t, dict)}
-    if "searchFlightsByNumber" not in names or "searchFlightsByDepArr" not in names:
-        raise RuntimeError("Aviation MCP 缺少航班查询工具")
+    tools = listing.get("result", {}).get("tools", [])
+    names = {t.get("name") for t in tools if isinstance(t, dict)}
+    if "searchFlightsByDepArr" not in names:
+        raise RuntimeError("Aviation MCP 缺少 searchFlightsByDepArr")
 
-    # MCP 没有按航空公司批量查询的专用工具。优先读取环境变量提供的航班号列表；
-    # 没有列表时用常见测试航班验证接口，并明确不伪造全网扫描结果。
-    flight_numbers = [x.strip().upper() for x in os.getenv("MONITOR_FLIGHT_NUMBERS", "").split(",") if x.strip()]
-    if not flight_numbers:
-        print("未配置 MONITOR_FLIGHT_NUMBERS。为避免伪造‘全部航班’，本次只做接口可用性检查。")
-        for fnum in ("CZ308", "MU2157"):
-            result = tool("searchFlightsByNumber", {"fnum": fnum, "date": date}, 10)
-            records = parse_flight_records(result)
-            print(f"{fnum}：返回 {len(records)} 条")
+    # 全国模式：不限制出发/到达机场，只传日期。
+    # MCP schema 将 dep/arr 定义为可选；如果服务端支持无约束查询，
+    # 这一次调用即可返回当天航班清单，然后本程序筛选 CZ 国内航班。
+    print("\n正在向 VariFlight 请求：当天、起降机场不限的航班清单……")
+    try:
+        result = tool(
+            "searchFlightsByDepArr",
+            {"date": date, "dep": None, "depcity": None, "arr": None, "arrcity": None},
+            2,
+        )
+    except Exception as exc:
+        print(f"全国航班清单查询失败：{exc}")
+        print("当前 MCP 如果不支持‘起降机场均不限’，就不能仅靠该工具获得全国 CZ 全量清单；程序不会伪造结果或暴力遍历机场。")
         return
 
-    alerts = []
-    for fnum in flight_numbers:
-        if fnum[:2] not in AIRLINES:
-            continue
-        try:
-            result = tool("searchFlightsByNumber", {"fnum": fnum, "date": date}, 20)
-            for f in parse_flight_records(result):
-                if not domestic(f):
-                    continue
-                d = delay_minutes(f)
-                if d is not None and d >= DELAY_THRESHOLD:
-                    alerts.append((f, d))
-        except Exception as exc:
-            print(f"{fnum} 查询失败：{exc}")
+    records = parse_flight_records(result)
+    print(f"MCP 返回航班记录：{len(records)} 条")
 
+    cz_domestic = [f for f in records if is_cz(f) and is_domestic(f)]
+    print(f"筛选 CZ 国内航班：{len(cz_domestic)} 条")
+
+    alerts = []
+    for flight in cz_domestic:
+        delay = delay_minutes(flight)
+        if delay is not None and delay >= DELAY_THRESHOLD:
+            alerts.append((flight, delay))
+
+    print(f"达到 ≥{DELAY_THRESHOLD} 分钟的严重延误：{len(alerts)} 条")
     if alerts:
-        print("\n🚨 发现严重延误航班")
-        for f, d in alerts:
-            print(f"{f.get('FlightNo','未知')}｜{f.get('FlightDep','')}→{f.get('FlightArr','')}｜延误 {d} 分钟｜状态：{f.get('FlightState','')}")
+        print("\n🚨 CZ 严重延误航班")
+        for flight, delay in alerts:
+            print(format_alert(flight, delay))
     else:
-        print("\n本次没有发现达到 3小时50分钟 的 CZ/MU 国内航班。")
+        print("\n本次没有发现达到 3小时50分钟 的 CZ 国内航班。")
 
 
 if __name__ == "__main__":
