@@ -36,20 +36,15 @@ def text_of(x):
     return str(x)
 
 
-def get_mcp_today():
-    result = tool("getTodayDate", {}, 2)
-    text = text_of(result)
-    m = re.search(r"20\d{2}-\d{2}-\d{2}", text)
-    if not m:
-        raise RuntimeError(f"MCP 未返回有效当天日期：{text[:500]}")
-    return m.group(0), text
+def get_beijing_today():
+    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
 
 def main():
     if not API_KEY:
         raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
 
-    print("=== VariFlight MCP 当天日期诊断 ===")
+    print("=== VariFlight MCP 北京时间当天诊断 ===")
     print(f"MCP：{MCP_URL}")
     listing = rpc("tools/list", {}, 1)
     tools = listing.get("result", {}).get("tools", [])
@@ -57,21 +52,16 @@ def main():
     print(f"工具数量：{len(names)}")
     print("工具发现：" + ", ".join(sorted(names)))
 
-    if "getTodayDate" not in names:
-        raise RuntimeError("MCP 未提供 getTodayDate")
+    # 航班查询日期以中国标准时间（UTC+8）为准，不使用 MCP 的错误日期。
+    today = get_beijing_today()
+    print(f"北京时间：{datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"航班查询日期：{today}")
+
     if "searchFlightsByDepArr" not in names:
         raise RuntimeError("MCP 未提供 searchFlightsByDepArr")
 
-    today, raw_date = get_mcp_today()
-    china_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
-    beijing_today = china_now.strftime("%Y-%m-%d")
-    print(f"北京时间：{china_now.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"MCP当天日期：{today}")
-    print(f"MCP日期原文：{raw_date[:300]}")
-    if today != beijing_today:
-        print(f"⚠️ MCP日期与北京时间不同：MCP={today} / 北京={beijing_today}")
-
-    result = tool("searchFlightsByDepArr", {"dep": "CAN", "arr": "PEK", "date": today}, 3)
+    # 低额度诊断：验证当天日期进入真实航班查询请求。
+    result = tool("searchFlightsByDepArr", {"dep": "CAN", "arr": "PEK", "date": today}, 2)
     print("=== CAN→PEK 当天查询原始返回 ===")
     print(json.dumps(result, ensure_ascii=False)[:5000])
     print("=== 诊断结束 ===")
