@@ -1,0 +1,30 @@
+name: China Flight Delay Monitor
+
+on:
+  schedule:
+    # Every 10 minutes (GitHub may occasionally delay scheduled runs)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VARIFLIGHT_API_KEY: ${{ secrets.VARIFLIGHT_API_KEY }}
+      VARIFLIGHT_MCP_API_URL: ${{ secrets.VARIFLIGHT_MCP_API_URL }}
+      DELAY_THRESHOLD_MINUTES: '120'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check flights
+        run: python flight_monitor.py
