@@ -33,27 +33,8 @@ def tool(name, arguments=None, request_id=1):
     return result.get("result", {})
 
 
-def text_of(x):
-    if isinstance(x, str): return x
-    if isinstance(x, dict): return " ".join(text_of(v) for v in x.values())
-    if isinstance(x, list): return " ".join(text_of(v) for v in x)
-    return str(x)
-
-
 def beijing_now():
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
-
-
-def extract_json_text(result):
-    texts = []
-    def walk(x):
-        if isinstance(x, dict):
-            for v in x.values(): walk(v)
-        elif isinstance(x, list):
-            for v in x: walk(v)
-        elif isinstance(x, str): texts.append(x)
-    walk(result)
-    return "\n".join(texts)
 
 
 def main():
@@ -62,14 +43,14 @@ def main():
 
     print("=== VariFlight MCP 认证与参数诊断 ===")
     print(f"MCP：{MCP_URL}")
-    print(f"API Key 已读取：{'YES' if API_KEY else 'NO'} | 长度：{len(API_KEY)}")
+    print(f"API Key 已读取：YES | 长度：{len(API_KEY)}")
 
     listing = rpc("tools/list", {}, 1)
     tools = listing.get("result", {}).get("tools", [])
-    print(f"工具数量：{len(tools)}")
     targets = []
     for t in tools:
-        if not isinstance(t, dict): continue
+        if not isinstance(t, dict):
+            continue
         name = t.get("name", "")
         if name in {"searchFlightsByDepArr", "searchFlightsByNumber"}:
             targets.append(t)
@@ -78,23 +59,20 @@ def main():
             print("输入 schema：")
             print(json.dumps(t.get("inputSchema", {}), ensure_ascii=False, indent=2)[:5000])
 
-    if not targets:
-        raise RuntimeError("MCP 没有找到航班查询工具")
-
+    names = {t.get("name") for t in targets}
     today = beijing_now().strftime("%Y-%m-%d")
     print(f"\n北京时间：{beijing_now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"航班查询日期：{today}")
 
-    # 优先按航班号查询，避免机场参数猜测造成误判。测试一个明确的国内航班号。
-    if any(t.get("name") == "searchFlightsByNumber" for t in targets):
-        print("\n=== 测试 searchFlightsByNumber ===")
+    if "searchFlightsByNumber" in names:
+        print("\n=== 测试 searchFlightsByNumber（正确参数 fnum） ===")
         try:
-            result = tool("searchFlightsByNumber", {"flightNo": "MU2157", "date": today, "dep": "", "arr": ""}, 2)
+            result = tool("searchFlightsByNumber", {"fnum": "MU2157", "date": today, "dep": "", "arr": ""}, 2)
             print(json.dumps(result, ensure_ascii=False)[:5000])
         except Exception as exc:
             print(f"航班号查询异常：{exc}")
 
-    if any(t.get("name") == "searchFlightsByDepArr" for t in targets):
+    if "searchFlightsByDepArr" in names:
         print("\n=== 测试 searchFlightsByDepArr ===")
         try:
             result = tool("searchFlightsByDepArr", {"dep": "CAN", "arr": "PEK", "date": today}, 3)
@@ -103,7 +81,6 @@ def main():
             print(f"机场查询异常：{exc}")
 
     print("\n=== 诊断结束 ===")
-    print("注意：本次只诊断真实 MCP 参数和认证返回，不会伪造航班结果。")
 
 
 if __name__ == "__main__":
