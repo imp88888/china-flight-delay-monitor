@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 10
     env:
       VARIFLIGHT_API_KEY: ${{ secrets.VARIFLIGHT_API_KEY }}
-      VARIFLIGHT_MCP_URL: https://ai.variflight.com/servers/tripmatch/mcp
+      VARIFLIGHT_MCP_URL: https://ai.variflight.com/servers/aviation/mcp
       DELAY_THRESHOLD_MINUTES: '120'
     steps:
       - name: Checkout
@@ -25,5 +25,5 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip requests
 
-      - name: Check flights through VariFlight MCP
+      - name: Check flights through VariFlight Aviation MCP
         run: python flight_monitor.py
