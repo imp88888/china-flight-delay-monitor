@@ -5,193 +5,123 @@ from datetime import datetime
 
 import requests
 
-MCP_URL = os.getenv("VARIFLIGHT_MCP_URL", "https://ai.variflight.com/servers/aviation/mcp")
+MCP_URL = os.getenv("VARIFLIGHT_MCP_URL", "https://ai.variflight.com/servers/tripmatch/mcp")
 API_KEY = os.getenv("VARIFLIGHT_API_KEY", "")
 THRESHOLD_MINUTES = int(os.getenv("DELAY_THRESHOLD_MINUTES", "120"))
 AIRLINES = {"CZ", "CA", "MU"}
-# 先监控主要国内枢纽，避免每10分钟产生大量 MCP 额度消耗。
-MONITOR_ROUTES = os.getenv("MONITOR_ROUTES", "CAN-PEK,CAN-PVG,CAN-SHA,CAN-SZX,CAN-CTU,CAN-HGH,CAN-CKG,CAN-KMG,CAN-XMN,CAN-WUH,CAN-TSN,CAN-TAO,CAN-NKG,CAN-XIY,CAN-HAK")
+ROUTES = os.getenv("MONITOR_ROUTES", "CAN-PEK,CAN-PVG,CAN-SHA,CAN-SZX,CAN-CTU,CAN-HGH")
 
 
-def mcp_call(method, params, request_id=1):
+def rpc(method, params=None, request_id=1):
     if not API_KEY:
         raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
-    response = requests.post(
-        MCP_URL,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "X-API-Key": API_KEY,
-        },
-        json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-        timeout=30,
-    )
-    response.raise_for_status()
-    text = response.text.strip()
+    r = requests.post(MCP_URL, headers={"Content-Type":"application/json","Accept":"application/json, text/event-stream","X-API-Key":API_KEY}, json={"jsonrpc":"2.0","id":request_id,"method":method,"params":params or {}}, timeout=30)
+    r.raise_for_status()
+    text = r.text.strip()
     if text.startswith("data:"):
         lines = [x[5:].strip() for x in text.splitlines() if x.startswith("data:")]
         text = lines[-1] if lines else text
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"MCP returned non-JSON response: {text[:1000]}")
+    return json.loads(text)
 
 
-def call_tool(name, arguments, request_id):
-    result = mcp_call("tools/call", {"name": name, "arguments": arguments}, request_id)
+def tool(name, arguments, request_id):
+    result = rpc("tools/call", {"name":name,"arguments":arguments}, request_id)
     if "error" in result:
         raise RuntimeError(str(result["error"]))
     return result.get("result", {})
 
 
-def parse_json_string(text):
-    text = text.strip()
-    if not text:
+def parse_json_text(text):
+    if not isinstance(text, str):
         return None
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        # MCP 有时会返回带说明文字的 JSON；尝试截取第一个 JSON 对象/数组。
-        start_obj = text.find("{")
-        start_arr = text.find("[")
-        starts = [x for x in (start_obj, start_arr) if x >= 0]
-        if not starts:
-            return None
-        start = min(starts)
-        for end in range(len(text), start, -1):
-            try:
-                return json.loads(text[start:end])
-            except json.JSONDecodeError:
-                continue
-    return None
+    except Exception:
+        return None
 
 
-def records(result):
-    out = []
-    candidates = [result.get("structuredContent"), result.get("content"), result]
-    for candidate in candidates:
-        if isinstance(candidate, str):
-            parsed = parse_json_string(candidate)
-            if parsed is not None:
-                out.extend(records(parsed if isinstance(parsed, dict) else {"data": parsed}))
-            continue
-        if isinstance(candidate, list):
-            for item in candidate:
-                if isinstance(item, dict):
-                    if item.get("type") == "text" and isinstance(item.get("text"), str):
-                        parsed = parse_json_string(item["text"])
-                        if parsed is not None:
-                            out.extend(records(parsed if isinstance(parsed, dict) else {"data": parsed}))
-                        else:
-                            out.append({"_text": item["text"]})
-                    else:
-                        out.append(item)
-                elif isinstance(item, str):
-                    parsed = parse_json_string(item)
-                    if parsed is not None:
-                        out.extend(records(parsed if isinstance(parsed, dict) else {"data": parsed}))
-        elif isinstance(candidate, dict):
-            # 直接的航班数组字段
-            found_list = False
-            for key in ("flights", "data", "results", "items", "list"):
-                value = candidate.get(key)
-                if isinstance(value, list):
-                    found_list = True
-                    out.extend(x if isinstance(x, dict) else {"_text": str(x)} for x in value)
-                elif isinstance(value, str):
-                    parsed = parse_json_string(value)
-                    if isinstance(parsed, list):
-                        found_list = True
-                        out.extend(x if isinstance(x, dict) else {"_text": str(x)} for x in parsed)
-            if not found_list and any(k in candidate for k in ("flightNo", "flight_no", "fnum", "airlineCode")):
-                out.append(candidate)
-    return out
+def extract_records(result):
+    found=[]
+    def walk(x):
+        if isinstance(x, dict):
+            if any(k in x for k in ("flightNo","flight_no","fnum","airlineCode")):
+                found.append(x)
+            for v in x.values(): walk(v)
+        elif isinstance(x, list):
+            for v in x: walk(v)
+        elif isinstance(x, str):
+            parsed=parse_json_text(x)
+            if parsed is not None: walk(parsed)
+    walk(result)
+    unique=[]; seen=set()
+    for item in found:
+        key=json.dumps(item,ensure_ascii=False,sort_keys=True)
+        if key not in seen:
+            seen.add(key); unique.append(item)
+    return unique
 
 
-def extract_text(value):
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return " ".join(extract_text(v) for v in value.values())
-    if isinstance(value, list):
-        return " ".join(extract_text(v) for v in value)
-    return str(value)
+def text_of(x):
+    if isinstance(x,str): return x
+    if isinstance(x,dict): return " ".join(text_of(v) for v in x.values())
+    if isinstance(x,list): return " ".join(text_of(v) for v in x)
+    return str(x)
 
 
-def airline_code(flight):
-    text = extract_text(flight).upper()
-    match = re.search(r"\b(CZ|CA|MU)\s*\d{2,4}\b", text)
-    if match:
-        return match.group(1)
-    return None
+def airline(f):
+    m=re.search(r"\b(CZ|CA|MU)\s*\d{2,4}\b",text_of(f).upper())
+    return m.group(1) if m else None
 
 
-def delay_minutes(flight):
-    for key in ("delay_minutes", "delayMinutes", "delay", "delayTime", "delay_time", "delayMinute"):
-        value = flight.get(key)
-        if isinstance(value, (int, float)):
-            return int(value)
-        if isinstance(value, str):
-            match = re.search(r"(\d+)\s*(?:分钟|分|min|minutes?)", value, re.I)
-            if match:
-                return int(match.group(1))
-    text = extract_text(flight)
-    patterns = [
-        r"(?:延误|delay)[：:= ]*(\d+)\s*(?:分钟|分|min)?",
-        r"(\d+)\s*(?:分钟|分|min)\s*(?:延误|delay)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return int(match.group(1))
+def delay(f):
+    for k in ("delayMinutes","delay_minutes","delayMinute","delayTime","delay"):
+        v=f.get(k)
+        if isinstance(v,(int,float)): return int(v)
+        if isinstance(v,str):
+            m=re.search(r"(\d+)\s*(?:分钟|分|min|minutes?)",v,re.I)
+            if m: return int(m.group(1))
+    text=text_of(f)
+    for p in (r"(?:延误|delay)[：:= ]*(\d+)\s*(?:分钟|分|min)?",r"(\d+)\s*(?:分钟|分|min)\s*(?:延误|delay)"):
+        m=re.search(p,text,re.I)
+        if m: return int(m.group(1))
     return 0
 
 
 def main():
-    if not API_KEY:
-        raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    severe = []
-    total = 0
-    airline_counts = {x: 0 for x in sorted(AIRLINES)}
-    routes = [x.strip().upper() for x in MONITOR_ROUTES.split(",") if "-" in x]
-
-    print("=== 中国航班延误监控 ===")
+    if not API_KEY: raise RuntimeError("VARIFLIGHT_API_KEY is not configured")
+    print("=== VariFlight MCP 诊断 ===")
+    print(f"MCP：{MCP_URL}")
+    listing=rpc("tools/list",request_id=1)
+    names=[x.get("name") for x in listing.get("result",{}).get("tools",[])]
+    print("工具发现：",", ".join(names) or "无")
+    today_result=tool("getTodayDate",{},2)
+    match=re.search(r"20\d{2}-\d{2}-\d{2}",text_of(today_result))
+    today=match.group(0) if match else datetime.now().strftime("%Y-%m-%d")
     print(f"日期：{today}")
-    print("航空公司：CZ / CA / MU")
-    print(f"阈值：≥ {THRESHOLD_MINUTES} 分钟")
-    print(f"监控航线：{len(routes)} 条")
-
-    for index, route in enumerate(routes, start=10):
-        dep, arr = route.split("-", 1)
+    total=0; matched={x:0 for x in AIRLINES}; severe=[]
+    routes=[x.strip().upper() for x in ROUTES.split(",") if "-" in x]
+    for i,route in enumerate(routes,10):
+        dep,arr=route.split("-",1)
         try:
-            result = call_tool("searchFlightsByDepArr", {"dep": dep, "arr": arr, "date": today}, index)
-            flights = records(result)
-            total += len(flights)
-            print(f"{route}: MCP返回 {len(flights)} 条")
-            for flight in flights:
-                code = airline_code(flight)
-                if code not in AIRLINES:
-                    continue
-                airline_counts[code] += 1
-                delay = delay_minutes(flight)
-                if delay >= THRESHOLD_MINUTES:
-                    severe.append((code, flight, delay, route))
-        except Exception as exc:
-            print(f"⚠️ {route} 查询失败：{exc}")
+            result=tool("searchFlightsByDepArr",{"dep":dep,"arr":arr,"date":today},i)
+            recs=extract_records(result); total+=len(recs)
+            print(f"{route}: 解析航班 {len(recs)} 条")
+            for f in recs:
+                code=airline(f)
+                if code not in AIRLINES: continue
+                matched[code]+=1; d=delay(f)
+                if d>=THRESHOLD_MINUTES: severe.append((code,f,d,route))
+        except Exception as e:
+            print(f"⚠️ {route}: {e}")
+    print("=== 结果 ===")
+    print(f"解析航班：{total}")
+    print(f"CZ：{matched['CZ']} | CA：{matched['CA']} | MU：{matched['MU']}")
+    print(f"≥{THRESHOLD_MINUTES}分钟严重延误：{len(severe)}")
+    for code,f,d,route in severe:
+        number=f.get("flightNo") or f.get("flight_no") or f.get("fnum") or "UNKNOWN"
+        print(f"🚨 {code}{number} | {route} | 延误 {d} 分钟")
+        print(json.dumps(f,ensure_ascii=False)[:800])
+    if not severe:
+        print("当前没有检测到达到阈值的 CZ/CA/MU 航班；请查看‘工具发现’和‘解析航班’数量。")
 
-    print("--- 结果 ---")
-    print(f"MCP 返回记录：{total}")
-    print(f"识别 CZ/CA/MU：{sum(airline_counts.values())}")
-    print(f"CZ：{airline_counts['CZ']} | CA：{airline_counts['CA']} | MU：{airline_counts['MU']}")
-    print(f"严重延误航班：{len(severe)}")
-
-    for code, flight, delay, route in severe:
-        number = flight.get("flightNo") or flight.get("flight_no") or flight.get("fnum") or "UNKNOWN"
-        print(f"🚨 {code} {number} | {route} | 延误 {delay} 分钟")
-        print(json.dumps(flight, ensure_ascii=False)[:1000])
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
