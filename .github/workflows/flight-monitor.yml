@@ -2,7 +2,6 @@ name: China Flight Delay Monitor
 
 on:
   schedule:
-    # Every 10 minutes (GitHub may occasionally delay scheduled runs)
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
@@ -12,8 +11,8 @@ jobs:
     timeout-minutes: 10
     env:
       VARIFLIGHT_API_KEY: ${{ secrets.VARIFLIGHT_API_KEY }}
+      VARIFLIGHT_MCP_URL: https://ai.variflight.com/servers/tripmatch/mcp
       DELAY_THRESHOLD_MINUTES: '120'
-      MONITOR_ROUTES: 'CAN-PEK,CAN-SHA,CAN-PVG,CAN-SZX,CAN-CTU,CAN-HGH'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
