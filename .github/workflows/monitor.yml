@@ -12,7 +12,7 @@ jobs:
     env:
       VARIFLIGHT_API_KEY: ${{ secrets.VARIFLIGHT_API_KEY }}
       VARIFLIGHT_MCP_URL: https://ai.variflight.com/servers/aviation/mcp
-      DELAY_THRESHOLD_MINUTES: '230'
+      DELAY_THRESHOLD_MINUTES: '120'
       MONITOR_AIRLINES: 'CZ'
     steps:
       - name: Checkout
