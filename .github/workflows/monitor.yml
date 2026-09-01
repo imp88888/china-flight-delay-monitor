@@ -8,7 +8,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     env:
       VARIFLIGHT_API_KEY: ${{ secrets.VARIFLIGHT_API_KEY }}
       VARIFLIGHT_MCP_URL: https://ai.variflight.com/servers/aviation/mcp
@@ -31,9 +31,26 @@ jobs:
         with:
           path: data/cz_flights_today.json
           key: cz-flights-${{ env.CACHE_DATE }}
+          restore-keys: |
+            cz-flights-
 
       - name: Install dependencies
         run: python -m pip install --upgrade pip requests
 
       - name: Check CZ flights through VariFlight MCP
         run: python flight_monitor.py
+
+      - name: Verify and save CZ cache
+        if: success()
+        run: |
+          test -s data/cz_flights_today.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/cz_flights_today.json")
+          obj = json.loads(p.read_text(encoding="utf-8"))
+          flights = obj.get("flights", [])
+          if not obj.get("date") or not isinstance(flights, list) or not flights:
+              raise SystemExit("CZ cache is missing, invalid, or empty")
+          print(f"CACHE_OK date={obj['date']} flights={len(flights)} updated_at={obj.get('updated_at','')}")
+          PY
