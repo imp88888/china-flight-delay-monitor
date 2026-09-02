@@ -1,25 +1,19 @@
-# 白云机场航班延误监控
+# 抓取适配器 (非官方抓取)
 
-广州白云国际机场（CAN）国内航班延误监控系统第一版。
+本分支新增了基于 HTML 抓取的航班适配器（优先顺序：飞常准 -> 携程 -> 飞猪），用于在没有或不想使用官方 API Key 时作为临时数据源。请注意风险：此方法可能违反目标站点服务条款、易受页面结构/反爬机制影响，且需做好限速与代理策略以降低被封风险。
 
-- 24小时持续监控，默认每5分钟轮询
-- 仅关注 CAN 国内航班
-- 严重延误阈值默认 >= 120 分钟
-- 同一航班每天只触发一次严重延误告警
-- 每日运行简报
-- Mock 数据源：无需 API Key 即可测试
-- 可插拔真实航班数据 Provider
-- 邮件告警、企业微信机器人接口
-- FastAPI 健康检查、状态和航班接口
-- SQLite 持久化
-- Docker Compose 一键运行
+环境变量（可选）
+- SCRAPE_TTL: 缓存 TTL（秒），默认 120
+- REQUESTS_PROXY: 可选代理地址（例如 http://user:pwd@host:port）
+- SCRAPE_UA_LIST: 自定义 User-Agent 列表，逗号分隔
+- SCRAPE_RETRIES: 重试次数，默认 3
 
-> Mock Provider 仅用于开发/测试，不代表真实航班状态。正式24小时运行前，需要接入有授权的实时航班数据服务。
+如何运行测试（CI 不联网，测试基于静态 HTML 片段）
+1. 创建虚拟环境并安装依赖：
+   pip install -r requirements.txt
+2. 运行测试：
+   pytest -q
 
-## 启动
-```bash
-cp .env.example .env
-docker compose up -d --build
-```
-
-健康检查：`http://服务器IP:8000/health`
+后续建议：
+- 生产环境推荐：代理池、IP 轮换、速率限制、增加官方 API 兜底。
+- 定期维护解析规则（页面结构变化时需更新 selectors）。
